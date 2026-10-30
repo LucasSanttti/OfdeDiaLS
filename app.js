@@ -1,6 +1,8 @@
 /* Gestão de Serviço – 27º BPM Batalhão Cabanagem. Dados ficam somente neste aparelho (localStorage). */
 'use strict';
 const KEY = 'gvtr27.v1';
+const APP_VERSION = '1.2 (30/10/2026)';
+const HIST_KEY = 'gvtr27.hist';
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -60,7 +62,7 @@ function defaults() {
   };
 }
 function novoServico(data) {
-  return { data: data || hojeISO(), pelotao: '', empregos: [], operacoes: [], tarefas: [], rondas: [], eventos: [], avisos: [], avulsos: [], log: [] };
+  return { data: data || hojeISO(), pelotao: '', empregos: [], operacoes: [], tarefas: [], rondas: [], eventos: [], avisos: [], avulsos: [], log: [], notif: {} };
 }
 function hojeISO() { const d = new Date(); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; }
 
@@ -68,6 +70,8 @@ let S;
 try { S = JSON.parse(localStorage.getItem(KEY)); } catch (e) { S = null; }
 if (!S || !S.v) S = defaults();
 S.ui = Object.assign({ tab: 'painel', filtro: 'agora', modo: 'cia', rel: 'mapa' }, S.ui || {});
+S.config.alertas = Object.assign({ ativo: true, antecedencia: 15, limOcorr: 60, limQaj: 40 }, S.config.alertas || {});
+S.servico.notif = S.servico.notif || {};
 function save() { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) { toast('⚠️ Não foi possível salvar'); } }
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
 
@@ -166,8 +170,9 @@ function dayOffset(tipo, ini, isTarefa) {
 function applyParsed(results, modo) {
   const datas = results.map((r) => r.data).filter(Boolean);
   if (modo === 'novo') {
+    arquivarServico('antes-da-importacao');
     const keep = S.servico;
-    S.servico = novoServico(datas[0] || keep.data);
+    S.servico = novoServico(datas[0] || keep.data); S.servico._id = uid();
     log('Novo serviço criado por importação de escala');
   } else if (!S.servico.data && datas[0]) S.servico.data = datas[0];
   const sv = S.servico;
@@ -247,22 +252,70 @@ function unassign(empId, idx) {
 
 /* ================= UI base ================= */
 function toast(msg) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toast._t); toast._t = setTimeout(() => t.classList.remove('on'), 2200); }
-let sheetOpen = false, sheetCtx = null;
-function openSheet(html, ctx) {
+let sheetOpen = false, sheetCtx = null, stack = [], navPop = false, ignorePop = 0;
+const sheetKey = (c) => [c.kind, c.id || '', c.k || '', c.empId || '', c.idx ?? ''].join(':');
+// Abre uma tela inferior. Cada tela nova entra na pilha do botão "voltar" do Android.
+function openSheet(html, ctx, opts = {}) {
+  ctx = ctx || { kind: 'misc' };
   $('#sheetBody').innerHTML = '<div class="grab"></div>' + html;
   $('#sheet').classList.remove('hidden');
-  if (!sheetOpen) { history.pushState({ sheet: 1 }, ''); sheetOpen = true; }
-  sheetCtx = ctx || null;
-  $('#sheetBody').scrollTop = 0;
+  const key = sheetKey(ctx), top = stack[stack.length - 1];
+  if (navPop) { /* reabrindo após "voltar" */ }
+  else if (top && (opts.replace || top.key === key)) { top.key = key; top.reopen = opts.reopen || top.reopen; }
+  else { stack.push({ key, reopen: opts.reopen }); history.pushState({ sheet: stack.length }, ''); }
+  sheetOpen = true; sheetCtx = ctx;
+  if (!top || top.key !== key) $('#sheetBody').scrollTop = 0;
 }
-function closeSheet(fromPop) {
-  if (!sheetOpen) return;
-  $('#sheet').classList.add('hidden'); sheetOpen = false; sheetCtx = null;
-  if (!fromPop) history.back();
-  render();
+function hideSheet() { $('#sheet').classList.add('hidden'); sheetOpen = false; sheetCtx = null; render(); }
+function closeSheet() {
+  const n = stack.length; stack = [];
+  hideSheet();
+  if (n) { ignorePop++; history.go(-n); }
 }
-window.addEventListener('popstate', () => { if (sheetOpen) closeSheet(true); });
+function sheetBack() { history.back(); }
+window.addEventListener('popstate', () => {
+  if (ignorePop) { ignorePop--; return; }
+  if (dlgResolve) { closeDlg(null, true); return; }
+  if (!stack.length) return;
+  stack.pop();
+  const top = stack[stack.length - 1];
+  if (top && top.reopen) { navPop = true; try { top.reopen(); } finally { navPop = false; } }
+  else { stack = []; hideSheet(); }
+});
 $('#sheet .bk').addEventListener('click', () => closeSheet());
+
+/* ---------- janela de diálogo própria (substitui confirm/prompt) ---------- */
+let dlgResolve = null;
+function ask({ title, msg = '', fields = [], ok = 'Confirmar', cancel = 'Cancelar', danger = false }) {
+  return new Promise((res) => {
+    if (dlgResolve) dlgResolve(null);
+    dlgResolve = res;
+    $('#dlgBox').innerHTML = `<div class="dlg-t">${esc(title)}</div>${msg ? `<div class="dlg-m">${msg}</div>` : ''}
+      ${fields.map((f) => `<label class="f"><span>${esc(f.label)}</span><input id="dlg_${f.id}" type="${f.type || 'text'}" value="${esc(f.value || '')}" placeholder="${esc(f.placeholder || '')}" ${f.mode ? `inputmode="${f.mode}"` : ''} autocomplete="off"></label>`).join('')}
+      <div class="row mt"><button class="btn" data-dlg="0" style="flex:1">${esc(cancel)}</button><button class="btn ${danger ? 'pri' : 'blue'}" data-dlg="1" style="flex:1">${esc(ok)}</button></div>`;
+    $('#dlg').classList.remove('hidden');
+    history.pushState({ dlg: 1 }, '');
+    const first = $('#dlgBox input'); if (first) setTimeout(() => first.focus(), 60);
+    $('#dlgBox').onkeydown = (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); $('[data-dlg="1"]').click(); } };
+    $('#dlgBox').dataset.fields = JSON.stringify(fields.map((f) => f.id));
+  });
+}
+function closeDlg(val, fromPop) {
+  $('#dlg').classList.add('hidden');
+  const r = dlgResolve; dlgResolve = null;
+  if (!fromPop) { ignorePop++; history.back(); }
+  if (r) r(val);
+}
+$('#dlg').addEventListener('click', (ev) => {
+  const b = ev.target.closest('[data-dlg]');
+  if (ev.target.classList.contains('bk')) return closeDlg(null);
+  if (!b) return;
+  if (b.dataset.dlg === '0') return closeDlg(null);
+  const ids = JSON.parse($('#dlgBox').dataset.fields || '[]');
+  if (!ids.length) return closeDlg(true);
+  const out = {}; ids.forEach((id) => (out[id] = $('#dlg_' + id).value.trim()));
+  closeDlg(out);
+});
 
 function setTab(t) { S.ui.tab = t; save(); $$('#tabs button').forEach((b) => b.classList.toggle('on', b.dataset.tab === t)); render(); window.scrollTo(0, 0); }
 $('#tabs').addEventListener('click', (ev) => { const b = ev.target.closest('button[data-tab]'); if (b) setTab(b.dataset.tab); });
@@ -271,7 +324,81 @@ function tick() {
   const d = new Date();
   $('#clock').textContent = pad(d.getHours()) + ':' + pad(d.getMinutes());
 }
-setInterval(() => { tick(); if (!sheetOpen && ['painel', 'agenda'].includes(S.ui.tab) && !document.activeElement.matches('input,textarea,select')) render(); }, 30000);
+setInterval(() => { tick(); checkAlerts(); if (!sheetOpen && !dlgResolve && ['painel', 'agenda'].includes(S.ui.tab) && !document.activeElement.matches('input,textarea,select')) render(); }, 30000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) { tick(); checkAlerts(); if (!sheetOpen) render(); } });
+
+/* ================= ALERTAS ================= */
+const dur = (min) => (min < 60 ? `${min} min` : `${Math.floor(min / 60)}h${pad(min % 60)}`);
+function statusExcedido(e) {
+  if (!e.statusDesde) return 0;
+  const lim = ['ocorrencia', 'conduzindo'].includes(e.status) ? S.config.alertas.limOcorr : e.status === 'qaj' ? S.config.alertas.limQaj : 0;
+  if (!lim) return 0;
+  const m = Math.floor((Date.now() - e.statusDesde) / 60000);
+  return m >= lim ? m : 0;
+}
+async function notify(title, body, tag) {
+  if (navigator.vibrate) navigator.vibrate([250, 120, 250]);
+  showAlertBar(title, body);
+  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  try {
+    const reg = navigator.serviceWorker && (await navigator.serviceWorker.getRegistration());
+    const opt = { body, tag, icon: 'icon-192.png', badge: 'icon-192.png', vibrate: [250, 120, 250], renotify: true };
+    if (reg) reg.showNotification(title, opt); else new Notification(title, opt);
+  } catch (e) { /* sem notificação do sistema */ }
+}
+let alertQueue = [];
+function showAlertBar(title, body) {
+  alertQueue.push({ title, body, t: Date.now() });
+  alertQueue = alertQueue.slice(-4);
+  drawAlertBar();
+}
+function drawAlertBar() {
+  const el = $('#alertbar');
+  if (!alertQueue.length) { el.classList.add('hidden'); return; }
+  el.innerHTML = alertQueue.map((x, i) => `<div class="al"><div class="grow"><b>${esc(x.title)}</b><div>${esc(x.body)}</div></div><button class="iconbtn" data-al="${i}" aria-label="Dispensar">✕</button></div>`).join('');
+  el.classList.remove('hidden');
+}
+$('#alertbar').addEventListener('click', (ev) => { const b = ev.target.closest('[data-al]'); if (!b) return; alertQueue.splice(+b.dataset.al, 1); drawAlertBar(); });
+function checkAlerts() {
+  const cfg = S.config.alertas; if (!cfg.ativo || !S.servico.empregos.length) return;
+  const now = nowMin(), N = (S.servico.notif = S.servico.notif || {}); let changed = false;
+  const due = agendaEvents().filter((ev) => !ev.done && ['op', 'qaj', 'turno', 'tarefa', 'manual', 'fim'].includes(ev.kind) && now >= ev.t - cfg.antecedencia && now <= ev.t + 2);
+  const fresh = due.filter((ev) => !N['ev' + ev.kind + ev.t + ev.title]);
+  if (fresh.length) {
+    fresh.forEach((ev) => (N['ev' + ev.kind + ev.t + ev.title] = 1));
+    const first = fresh[0]; const falta = first.t - now;
+    const title = `⏰ ${falta > 0 ? 'Em ' + falta + ' min' : 'Agora'} (${hhmm(first.t)}): ${first.title.replace(/^\W+\s*/, '')}`;
+    const body = fresh.length > 1 ? fresh.slice(1).map((x) => `${hhmm(x.t)} ${x.title}`).join(' · ') : (first.sub || '');
+    notify(title, body.slice(0, 220), 'ev' + first.t); changed = true;
+  }
+  for (const e of S.servico.empregos) {
+    if (!isActive(e, now)) continue;
+    const m = statusExcedido(e); if (!m) continue;
+    const key = 'st' + e.id + e.statusDesde;
+    if (N[key]) continue;
+    N[key] = 1; changed = true;
+    notify(`⏱️ ${empLabel(e)}: ${dur(m)} em ${STATUS[e.status].l}`, `${e.statusObs || ''} Limite: ${['qaj'].includes(e.status) ? cfg.limQaj : cfg.limOcorr} min`.trim(), key);
+  }
+  if (changed) save();
+}
+async function pedirNotificacao() {
+  if (!('Notification' in window)) return toast('Este navegador não suporta notificações');
+  const p = await Notification.requestPermission();
+  toast(p === 'granted' ? '🔔 Notificações ativadas' : '🔕 Notificações bloqueadas no navegador');
+  render();
+}
+
+/* ================= HISTÓRICO / BACKUP AUTOMÁTICO ================= */
+function getHist() { try { return JSON.parse(localStorage.getItem(HIST_KEY)) || []; } catch (e) { return []; } }
+function arquivarServico(motivo) {
+  const sv = S.servico;
+  if (!sv.empregos.length && !sv.log.length) return false;
+  const h = getHist().filter((x) => x.id !== sv._id);
+  h.unshift({ id: sv._id || uid(), data: sv.data, salvoEm: Date.now(), motivo, servico: sv });
+  try { localStorage.setItem(HIST_KEY, JSON.stringify(h.slice(0, 5))); } catch (e) { try { localStorage.setItem(HIST_KEY, JSON.stringify(h.slice(0, 2))); } catch (e2) {} }
+  download(`backup-27bpm-${sv.data}-${motivo}.json`, JSON.stringify({ ...S, servico: sv }));
+  return true;
+}
 
 function renderHeader() {
   $('#who').textContent = S.config.nomeGuerra + ' · Oficial de Dia';
@@ -306,7 +433,7 @@ function filtroEmp(e, now) {
   return noTurno(e, f);
 }
 function emptyState() {
-  return `<div class="empty"><img src="icons/brasao.png" alt=""><h3 style="color:var(--tx);font-size:17px;text-transform:none;letter-spacing:0">Nenhum serviço carregado</h3>
+  return `<div class="empty"><img src="brasao.png" alt=""><h3 style="color:var(--tx);font-size:17px;text-transform:none;letter-spacing:0">Nenhum serviço carregado</h3>
   <p>Importe a escala ordinária e/ou extraordinária em PDF. O app separa as guarnições por Cia, operação e horário.</p>
   <button class="btn pri" data-act="importar">📄 Importar escala (PDF)</button>
   <p class="mt"><button class="btn sm ghost" data-act="novoemp">+ Criar GU manualmente</button></p></div>`;
@@ -322,9 +449,11 @@ function cardEmp(e, now) {
   if (before) stTxt = `⏳ Inicia ${hStr(e.inicio)}${e.d ? ' (+1)' : ''}`;
   if (after) stTxt = `✔️ Encerrado ${hStr(e.fim)}`;
   if (e.statusObs && !before && !after) stTxt += ` <small>· ${esc(e.statusObs)}</small>`;
+  const exc = !before && !after ? statusExcedido(e) : 0;
+  if (exc) stTxt += `<span class="late">⏱️ ${dur(exc)} – acima do limite</span>`;
   const tag = e.opId || e.operacao ? `<span class="tag op">${esc((e.operacao || '').replace(/^OPERA[ÇC][ÃA]O\s*/i, '').slice(0, 18))}</span>` : `<span class="tag">${esc(TIPOS[e.tipo] || e.tipo)}</span>`;
   const qaj = e.qaj ? ` · 🍽️ ${e.qaj.replace(/:/g, 'h').replace('-', '–')}` : '';
-  return `<button class="card s-${before || after ? 'x' : e.status} ${after ? 'off' : ''}" data-act="emp" data-id="${e.id}">
+  return `<button class="card s-${before || after ? 'x' : e.status} ${after ? 'off' : ''} ${exc ? 'exc' : ''}" data-act="emp" data-lp="1" data-id="${e.id}">
     <div class="r1"><span class="vtr">${e.vtr ? esc(e.vtr) : '📍'}</span>${tag}${me ? '<span class="tag me">VOCÊ</span>' : ''}<span class="time">${hStr(e.inicio)}–${hStr(e.fim)}</span></div>
     <div class="loc">${esc([empArea(e), e.local].filter(Boolean).join(' — ') || '—')}${qaj}</div>
     <div class="gu">${gu}</div>
@@ -356,6 +485,9 @@ function renderPainel() {
     <div class="counter"><b style="color:var(--ok)">${cnt(['area', 'operacao', 'apoio'])}</b><span>Na área/op.</span></div>
     <div class="counter"><b style="color:var(--bad)">${cnt(['ocorrencia', 'conduzindo'])}</b><span>Ocorrência</span></div>
     <div class="counter"><b style="color:var(--warn)">${cnt(['qaj', 'deslocamento', 'abastecimento', 'baixada'])}</b><span>Fora da área</span></div></div>`;
+  const nExc = ativos.filter((e) => statusExcedido(e)).length;
+  if (nExc) h += `<div class="banner bad mt">⏱️ ${nExc} GU(s) acima do tempo limite em ocorrência/QAJ</div>`;
+  if ('Notification' in window && Notification.permission === 'default' && S.config.alertas.ativo) h += `<button class="banner mt" data-act="notif">🔔 Toque para ativar os alertas de horário no celular</button>`;
   const prox = agendaEvents().filter((ev) => ev.t >= now && !ev.done).slice(0, 3);
   if (prox.length) h += `<div class="next">${prox.map((ev) => `<div><b>${hhmm(ev.t)}</b><span>${esc(ev.title)}</span></div>`).join('')}</div>`;
   if (!list.length) return h + `<div class="empty">Nenhuma GU neste filtro. <br><button class="btn sm mt" data-filtro-set="tudo">Ver tudo</button></div>`;
@@ -379,7 +511,7 @@ function renderPainel() {
     for (const k in ops) { const o = opById(k); h += secHtml('🟨 ' + esc(o ? o.nome : k), 'geral', ops[k], now); }
   }
   h += secHtml('🏠 Permanência / Reserva / Adm', '', postos, now);
-  h += `<div class="row mt2"><button class="btn sm" data-act="novoemp">+ Nova GU / posto</button></div>`;
+  h += `<p class="hint mt2">💡 Segure o dedo sobre uma viatura para mudar o status rapidamente.</p><div class="row"><button class="btn sm" data-act="novoemp">+ Nova GU / posto</button></div>`;
   return h;
 }
 
@@ -392,7 +524,7 @@ function bairroOptions(cia, sel) {
   const list = cia ? AREAS[cia] : [];
   return `<option value="">—</option>` + list.map((b) => `<option ${b === sel ? 'selected' : ''}>${b}</option>`).join('');
 }
-function openEmp(id) {
+function openEmp(id, opts = {}) {
   const e = empById(id); if (!e) return;
   const cf = conflitos(e);
   const hist = S.servico.log.filter((l) => l.ref === id).slice(-8).reverse();
@@ -410,7 +542,7 @@ function openEmp(id) {
   <details class="box mt2"><summary>✏️ Editar emprego (VTR, área, horário)</summary>${empForm(e)}
     <div class="row mt"><button class="btn blue" data-act="saveemp">Salvar</button><button class="btn" data-act="dupemp">Duplicar</button><button class="btn ghost" data-act="delemp">🗑️ Excluir</button></div></details>
   ${hist.length ? `<h3>Histórico</h3><div class="list">${hist.map((l) => `<div class="it"><div class="grow"><div class="t2">${new Date(l.t).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })} — ${esc(l.msg)}</div></div></div>`).join('')}</div>` : ''}`;
-  openSheet(h, { kind: 'emp', id });
+  openSheet(h, { kind: 'emp', id }, { reopen: () => openEmp(id), replace: opts.replace });
 }
 function empForm(e) {
   return `<div class="row"><label class="f" style="flex:1"><span>VTR</span><select id="fVtr">${vtrOptions(e.vtr)}</select></label>
@@ -437,8 +569,27 @@ function novoEmp() {
   const now = nowMin();
   const e = { id: 'e' + uid(), tipo: 'ordinario', operacao: '', opId: '', vtr: '', cia: '', bairro: '', local: '', rotulo: '', inicio: hhmm(Math.max(now, 0)), fim: hhmm(Math.max(now, 0) + 360), d: 0, turno: '', qaj: '', missao: '', membros: [{ funcao: 'CMT', mk: null }, { funcao: 'MOT', mk: null }], status: 'area', statusDesde: null, statusObs: '' };
   openSheet(`<div class="sh-title"><span class="vtr">Nova GU / posto</span><button class="iconbtn x" data-act="close">✕</button></div>${empForm(e)}
-    <div class="row mt"><button class="btn pri full" data-act="createemp">Criar e escalar efetivo</button></div>`, { kind: 'new', emp: e });
+    <div class="row mt"><button class="btn pri full" data-act="createemp">Criar e escalar efetivo</button></div>`, { kind: 'new', emp: e }, { reopen: null });
 }
+
+function openQuick(id) {
+  const e = empById(id); if (!e) return;
+  openSheet(`<div class="sh-title"><span class="vtr">${e.vtr ? 'VTR ' + esc(e.vtr) : esc(TIPOS[e.tipo])}</span><span class="tag">Status rápido</span><button class="iconbtn x" data-act="close">✕</button></div>
+   <div class="hint">${STATUS[e.status].e} ${STATUS[e.status].l} ${ago(e.statusDesde)}</div>
+   <div class="stgrid mt">${Object.entries(STATUS).map(([k, s]) => `<button class="stbtn ${e.status === k ? 'on' : ''}" data-act="qst" data-st="${k}"><span>${s.e}</span>${s.l}</button>`).join('')}</div>
+   <label class="f"><span>Observação (opcional)</span><input type="text" id="qObs" value="${esc(e.statusObs)}" placeholder="Nº ocorrência, local, destino…"></label>
+   <button class="btn full" data-act="emp" data-id="${id}">Abrir guarnição completa ›</button>`, { kind: 'quick', id }, { reopen: () => openQuick(id) });
+}
+let lpTimer = null, lpFired = false, lpStart = null;
+document.addEventListener('pointerdown', (ev) => {
+  const c = ev.target.closest('[data-lp]'); if (!c) return;
+  lpFired = false; lpStart = [ev.clientX, ev.clientY];
+  clearTimeout(lpTimer);
+  lpTimer = setTimeout(() => { lpFired = true; if (navigator.vibrate) navigator.vibrate(35); openQuick(c.dataset.id); }, 550);
+});
+document.addEventListener('pointermove', (ev) => { if (lpTimer && lpStart && Math.hypot(ev.clientX - lpStart[0], ev.clientY - lpStart[1]) > 10) { clearTimeout(lpTimer); lpTimer = null; } });
+['pointerup', 'pointercancel'].forEach((t) => document.addEventListener(t, () => { clearTimeout(lpTimer); lpTimer = null; }));
+document.addEventListener('contextmenu', (ev) => { if (ev.target.closest('[data-lp]')) ev.preventDefault(); });
 
 /* ---------- seletor de militar ---------- */
 function openPicker(ctx) {
@@ -453,7 +604,7 @@ function openPicker(ctx) {
       <label class="f" style="flex:1"><span>RG</span><input type="text" id="nRg" inputmode="numeric"></label></div>
       <label class="f"><span>Nome de guerra</span><input type="text" id="nNome" style="text-transform:uppercase"></label>
       <label class="f"><span>Unidade de origem (se de fora)</span><input type="text" id="nUn" placeholder="Ex.: 5º BPM"></label>
-      <button class="btn blue full" data-act="newmil">Cadastrar e selecionar</button></details>`, { kind: 'picker', ...ctx });
+      <button class="btn blue full" data-act="newmil">Cadastrar e selecionar</button></details>`, { kind: 'picker', ...ctx }, { reopen: () => openPicker(ctx) });
   const draw = () => {
     const q = $('#pkQ').value.trim().toUpperCase();
     const sp = target ? span(target) : null;
@@ -475,7 +626,7 @@ function openPicker(ctx) {
 }
 function pickMilitar(k) {
   const c = sheetCtx;
-  if (c.empId != null) { assign(c.empId, c.idx, k); toast('✅ ' + milName(k, false) + ' escalado'); openEmp(c.empId); }
+  if (c.empId != null) { assign(c.empId, c.idx, k); toast('✅ ' + milName(k, false) + ' escalado'); if (stack.length > 1) sheetBack(); else openEmp(c.empId, { replace: true }); }
   else { if (!S.servico.avulsos.includes(k) && !empsOf(k).length) S.servico.avulsos.push(k); log(`${milName(k)} adicionado ao serviço`); save(); toast('✅ Adicionado ao serviço'); closeSheet(); }
 }
 
@@ -579,7 +730,7 @@ function openMil(k) {
      <label class="f"><span>Nome de guerra</span><input type="text" id="eNome" value="${esc(m.nome)}"></label>
      <label class="f"><span>Unidade de origem</span><input type="text" id="eUn" value="${esc(m.unidade)}"></label>
      <button class="btn blue full" data-act="savemil" data-k="${k}">Salvar</button></details>
-   <div class="row mt2"><button class="btn ghost" data-act="rmmil" data-k="${k}">🚫 Retirar do serviço</button></div>`, { kind: 'mil', k });
+   <div class="row mt2"><button class="btn ghost" data-act="rmmil" data-k="${k}">🚫 Retirar do serviço</button></div>`, { kind: 'mil', k }, { reopen: () => openMil(k) });
 }
 
 /* ================= FROTA ================= */
@@ -605,7 +756,7 @@ function openVtr(id) {
   <label class="f"><span>Modelo (opcional)</span><input type="text" id="vMod" value="${esc(v.modelo || '')}"></label>
   <button class="btn blue full" data-act="savevtr" data-id="${id}">Salvar</button>
   <h3>Empregos no serviço</h3><div class="list">${u.all.map((e) => `<div class="it" data-act="emp" data-id="${e.id}"><div class="grow"><div class="t1">${hStr(e.inicio)}–${hStr(e.fim)} · ${esc(e.operacao || TIPOS[e.tipo])}</div><div class="t2">${esc(empArea(e) || e.local)} · ${e.membros.filter((m) => m.mk).map((m) => esc(milName(m.mk, false))).join(', ')}</div></div><span>›</span></div>`).join('') || '<div class="hint">Não empregada neste serviço.</div>'}</div>
-  <div class="row mt2"><button class="btn ghost" data-act="delvtr" data-id="${id}">🗑️ Remover da frota</button></div>`, { kind: 'vtr', id });
+  <div class="row mt2"><button class="btn ghost" data-act="delvtr" data-id="${id}">🗑️ Remover da frota</button></div>`, { kind: 'vtr', id }, { reopen: () => openVtr(id) });
 }
 
 /* ================= RELATÓRIOS ================= */
@@ -764,20 +915,33 @@ function openMenu() {
     <div class="it" data-act="novoemp"><div class="grow"><div class="t1">➕ Nova GU / posto</div></div>›</div>
     <div class="it" data-act="config"><div class="grow"><div class="t1">⚙️ Configurações</div><div class="t2">Nome de guerra, comandantes, assuntos do início de serviço</div></div>›</div>
     <div class="it" data-act="servico"><div class="grow"><div class="t1">📅 Dados do serviço</div><div class="t2">Data, pelotão, novo serviço</div></div>›</div>
+    <div class="it" data-act="encerrar"><div class="grow"><div class="t1">🏁 Encerrar serviço</div><div class="t2">Salva backup automático e começa um serviço novo</div></div>›</div>
+    <div class="it" data-act="hist"><div class="grow"><div class="t1">🗂️ Serviços anteriores</div><div class="t2">Os últimos 5 ficam guardados no aparelho</div></div>›</div>
     <div class="it" data-act="backup"><div class="grow"><div class="t1">💾 Exportar backup</div><div class="t2">Arquivo .json com tudo</div></div>›</div>
     <div class="it" data-act="restore"><div class="grow"><div class="t1">♻️ Restaurar backup</div></div>›</div>
-   </div><p class="hint mt2">🔒 Os dados ficam só neste aparelho. Nada é enviado para servidores.</p>`, { kind: 'menu' });
+   </div><p class="hint mt2">🔒 Os dados ficam só neste aparelho. Nada é enviado para servidores.</p><p class="hint">Versão ${APP_VERSION}</p>`, { kind: 'menu' }, { reopen: openMenu });
 }
 let pending = null;
+const CDN_PDF = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/';
+function loadScript(src) { return new Promise((res, rej) => { const s = document.createElement('script'); s.src = src; s.onload = res; s.onerror = () => { s.remove(); rej(new Error(src)); }; document.head.appendChild(s); }); }
+// Leitor de PDF: usa a cópia local se existir; senão baixa do CDN (fica guardado para uso offline).
 async function loadPdfjs() {
   if (window.pdfjsLib) return window.pdfjsLib;
-  await new Promise((res, rej) => { const s = document.createElement('script'); s.src = 'vendor/pdf.min.js'; s.onload = res; s.onerror = rej; document.head.appendChild(s); });
-  window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'vendor/pdf.worker.min.js';
+  let local = true;
+  try { await loadScript('pdf.min.js'); } catch (e) {
+    local = false;
+    try { await loadScript(CDN_PDF + 'pdf.min.js'); } catch (e2) { throw new Error('não foi possível carregar o leitor de PDF. Abra o app uma vez com internet para ele ficar guardado no aparelho.'); }
+  }
+  if (local) window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'pdf.worker.min.js';
+  else {
+    const r = await fetch(CDN_PDF + 'pdf.worker.min.js');
+    window.pdfjsLib.GlobalWorkerOptions.workerSrc = URL.createObjectURL(new Blob([await r.text()], { type: 'text/javascript' }));
+  }
   return window.pdfjsLib;
 }
 async function handlePdfs(files) {
   if (!files.length) return;
-  openSheet(`<div class="empty">⏳ Lendo ${files.length} arquivo(s)…</div>`, { kind: 'loading' });
+  openSheet(`<div class="empty">⏳ Lendo ${files.length} arquivo(s)…</div>`, { kind: 'loading' }, { replace: sheetOpen });
   try {
     const lib = await loadPdfjs();
     const results = [];
@@ -789,7 +953,7 @@ async function handlePdfs(files) {
     showImportPreview();
   } catch (e) {
     console.error(e);
-    openSheet(`<div class="sh-title"><b>Erro</b><button class="iconbtn x" data-act="close">✕</button></div><p>Não foi possível ler o PDF: ${esc(e.message)}</p><p class="hint">O PDF precisa ter texto (não pode ser foto/scan).</p>`);
+    openSheet(`<div class="sh-title"><b>Erro</b><button class="iconbtn x" data-act="close">✕</button></div><p>Não foi possível ler o PDF: ${esc(e.message)}</p><p class="hint">O PDF precisa ter texto (não pode ser foto/scan).</p>`, { kind: 'erro' }, { replace: true });
   }
 }
 function showImportPreview() {
@@ -804,7 +968,13 @@ function showImportPreview() {
   h += has ? `<div class="row wrap"><button class="btn pri" style="flex:1" data-act="impapply" data-m="add">➕ Adicionar ao serviço atual</button><button class="btn" style="flex:1" data-act="impapply" data-m="novo">🆕 Substituir (novo serviço)</button></div>`
     : `<button class="btn pri full" data-act="impapply" data-m="novo">✅ Confirmar e carregar serviço</button>`;
   h += `<p class="hint">Dica: você pode corrigir qualquer GU depois, tocando nela no Painel.</p>`;
-  openSheet(h, { kind: 'import' });
+  openSheet(h, { kind: 'import' }, { replace: true });
+}
+function openHist() {
+  const h = getHist();
+  openSheet(`<div class="sh-title"><b style="font-size:18px">🗂️ Serviços anteriores</b><button class="iconbtn x" data-act="close">✕</button></div>
+   <div class="list">${h.map((x, i) => `<div class="it"><div class="grow"><div class="t1">📅 ${dataBR(x.data)} · ${x.servico.empregos.length} GUs</div><div class="t2">Salvo ${new Date(x.salvoEm).toLocaleString('pt-BR')} · ${esc(x.motivo)}</div></div><button class="btn sm" data-act="histrest" data-i="${i}">Abrir</button></div>`).join('') || '<div class="hint">Nenhum serviço arquivado ainda.</div>'}</div>
+   <p class="hint mt">Abrir um serviço anterior arquiva o atual antes.</p>`, { kind: 'hist' }, { reopen: openHist });
 }
 function openConfig() {
   const c = S.config;
@@ -812,7 +982,12 @@ function openConfig() {
   openSheet(`<div class="sh-title"><b style="font-size:18px">⚙️ Configurações</b><button class="iconbtn x" data-act="close">✕</button></div>
    ${f('cNome', 'Seu posto e nome de guerra', c.nomeGuerra)}${f('cCmtCpc', 'Comandante CPC I', c.cmtCpc)}${f('cSubCpc', 'Subcomandante CPC I', c.subCpc)}${f('cCmtBpm', 'Comandante do 27º BPM', c.cmtBpm)}${f('cSubBpm', 'Subcomando do 27º BPM', c.subBpm)}${f('cFiscal', 'Fiscal de Dia (relatório de operação)', c.fiscal)}${f('cLocal', 'Local padrão do início de serviço', c.localInicio)}
    <label class="f"><span>Assuntos do início de serviço (um por linha)</span><textarea id="cAss" rows="8">${esc(c.assuntos.join('\n'))}</textarea></label>
-   <button class="btn blue full" data-act="savecfg">Salvar</button>`, { kind: 'cfg' });
+   <h3>🔔 Alertas</h3>
+   <label class="chk"><input type="checkbox" id="aAtivo" ${S.config.alertas.ativo ? 'checked' : ''}><span>Avisar antes dos eventos da linha do tempo e quando uma GU passar do limite</span></label>
+   <div class="row"><label class="f"><span>Antecedência (min)</span><input type="number" id="aAnt" value="${S.config.alertas.antecedencia}" min="1" max="120"></label><label class="f"><span>Limite ocorrência (min)</span><input type="number" id="aOc" value="${S.config.alertas.limOcorr}" min="5"></label><label class="f"><span>Limite QAJ (min)</span><input type="number" id="aQ" value="${S.config.alertas.limQaj}" min="5"></label></div>
+   <div class="row"><button class="btn sm" data-act="notif">Permitir notificações</button><button class="btn sm" data-act="testnotif">Testar alerta</button><span class="hint">${'Notification' in window ? { granted: '✅ permitidas', denied: '🚫 bloqueadas no Chrome', default: 'ainda não autorizadas' }[Notification.permission] : 'não suportado'}</span></div>
+   <p class="hint">Os alertas funcionam com o app aberto ou recém-minimizado. Com a tela bloqueada por muito tempo, o Android pode atrasá-los.</p>
+   <button class="btn blue full mt" data-act="savecfg">Salvar</button>`, { kind: 'cfg' }, { reopen: openConfig });
 }
 function openServico() {
   const sv = S.servico;
@@ -821,7 +996,7 @@ function openServico() {
    <label class="f"><span>Pelotão</span><input type="text" id="sPel" value="${esc(sv.pelotao)}"></label>
    <button class="btn blue full" data-act="savesvc">Salvar</button>
    <div class="sec mt2"><h2>Zona de risco</h2><p class="hint">Novo serviço apaga GUs, linha do tempo e registro deste serviço. Frota e banco de militares são mantidos.</p>
-   <button class="btn pri full" data-act="resetsvc">🆕 Iniciar novo serviço em branco</button></div>`, { kind: 'svc' });
+   <button class="btn pri full" data-act="resetsvc">🆕 Iniciar novo serviço em branco</button></div>`, { kind: 'svc' }, { reopen: openServico });
 }
 function download(name, text) {
   const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], { type: 'application/json' })); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000);
@@ -832,7 +1007,7 @@ $('#menuBtn').addEventListener('click', openMenu);
 $('#pdfInput').addEventListener('change', (ev) => { const f = [...ev.target.files]; ev.target.value = ''; handlePdfs(f); });
 $('#jsonInput').addEventListener('change', async (ev) => {
   const f = ev.target.files[0]; ev.target.value = ''; if (!f) return;
-  try { const d = JSON.parse(await f.text()); if (!d.v || !d.servico) throw new Error('arquivo inválido'); S = d; save(); toast('♻️ Backup restaurado'); closeSheet(); } catch (e) { toast('Erro: ' + e.message); }
+  try { const d = JSON.parse(await f.text()); if (!d.v || !d.servico) throw new Error('arquivo inválido'); S = d; S.servico.notif = S.servico.notif || {}; S.config.alertas = Object.assign({ ativo: true, antecedencia: 15, limOcorr: 60, limQaj: 40 }, S.config.alertas || {}); save(); toast('♻️ Backup restaurado'); closeSheet(); } catch (e) { toast('Erro: ' + e.message); }
 });
 document.addEventListener('change', (ev) => {
   const t = ev.target;
@@ -848,6 +1023,7 @@ document.addEventListener('click', (ev) => {
   const el = ev.target.closest('[data-act]');
   const fs = ev.target.closest('[data-filtro-set]'); if (fs) { S.ui.filtro = fs.dataset.filtroSet; save(); render(); return; }
   if (!el) return;
+  if (lpFired && el.dataset.lp) { lpFired = false; ev.preventDefault(); return; }
   if (el.tagName === 'INPUT' || el.tagName === 'SELECT') return;
   const a = el.dataset.act, c = sheetCtx || {};
   switch (a) {
@@ -857,7 +1033,7 @@ document.addEventListener('click', (ev) => {
     case 'pick': openPicker({ empId: c.id, idx: +el.dataset.i }); break;
     case 'unassign': unassign(c.id, +el.dataset.i); openEmp(c.id); break;
     case 'addslot': empById(c.id).membros.push({ funcao: el.dataset.fn, mk: null }); save(); openPicker({ empId: c.id, idx: empById(c.id).membros.length - 1 }); break;
-    case 'back': if (c.empId) openEmp(c.empId); else closeSheet(); break;
+    case 'back': if (stack.length > 1) sheetBack(); else if (c.empId) openEmp(c.empId, { replace: true }); else closeSheet(); break;
     case 'pickmil': pickMilitar(el.dataset.k); break;
     case 'newmil': {
       const nome = $('#nNome').value.trim(); if (!nome) return toast('Informe o nome');
@@ -865,9 +1041,9 @@ document.addEventListener('click', (ev) => {
     }
     case 'saveemp': { const e = empById(c.id); readEmpForm(e); log(`${empLabel(e)}: emprego editado (${e.inicio}–${e.fim} ${empArea(e)})`, e.id); save(); toast('✅ Salvo'); openEmp(e.id); break; }
     case 'dupemp': { const e = empById(c.id); const n = JSON.parse(JSON.stringify(e)); n.id = 'e' + uid(); n.membros = n.membros.map((m) => ({ funcao: m.funcao, mk: null })); S.servico.empregos.push(n); log(`${empLabel(n)} duplicada`, n.id); save(); openEmp(n.id); break; }
-    case 'delemp': { const e = empById(c.id); if (!confirm(`Excluir ${empLabel(e)} (${e.inicio}–${e.fim})?`)) return; e.membros.forEach((m) => m.mk && !S.servico.empregos.some((o) => o !== e && o.membros.some((x) => x.mk === m.mk)) && S.servico.avulsos.push(m.mk)); S.servico.empregos = S.servico.empregos.filter((x) => x !== e); log(`${empLabel(e)} excluída`); save(); closeSheet(); break; }
+    case 'delemp': (async () => { const e = empById(c.id); if (!(await ask({ title: `Excluir ${empLabel(e)}?`, msg: `${esc(e.operacao || TIPOS[e.tipo])} · ${e.inicio}–${e.fim}. Os militares voltam para "sem alocação".`, ok: 'Excluir', danger: true }))) return; e.membros.forEach((m) => m.mk && !S.servico.empregos.some((o) => o !== e && o.membros.some((x) => x.mk === m.mk)) && S.servico.avulsos.push(m.mk)); S.servico.empregos = S.servico.empregos.filter((x) => x !== e); log(`${empLabel(e)} excluída`); save(); closeSheet(); })(); break;
     case 'novoemp': novoEmp(); break;
-    case 'createemp': { const e = c.emp; readEmpForm(e); S.servico.empregos.push(e); if (!S.servico.data) S.servico.data = hojeISO(); log(`${empLabel(e)} criada (${e.inicio}–${e.fim})`, e.id); save(); openEmp(e.id); break; }
+    case 'createemp': { const e = c.emp; readEmpForm(e); S.servico.empregos.push(e); if (!S.servico.data) S.servico.data = hojeISO(); log(`${empLabel(e)} criada (${e.inicio}–${e.fim})`, e.id); save(); openEmp(e.id, { replace: true }); break; }
     case 'importar': $('#pdfInput').click(); break;
     case 'impapply': {
       $$('[data-imp]').forEach((i) => { const [ri, ei] = i.dataset.imp.split(':').map(Number); pending[ri].empregos[ei]._skip = !i.checked; });
@@ -883,12 +1059,12 @@ document.addEventListener('click', (ev) => {
       assign(to, idx, el.dataset.k); toast('✅ Movido'); openMil(el.dataset.k); break;
     }
     case 'savemil': { const m = S.militares[el.dataset.k]; m.grad = $('#eGrad').value; m.rg = $('#eRg').value.trim(); m.nome = $('#eNome').value.trim().toUpperCase(); m.unidade = $('#eUn').value.trim(); save(); toast('✅ Salvo'); openMil(el.dataset.k); break; }
-    case 'rmmil': { const k = el.dataset.k; if (!confirm(`Retirar ${milName(k)} de todas as GUs deste serviço?`)) return; S.servico.empregos.forEach((e) => { e.membros = e.membros.filter((m) => !(m.mk === k && m.funcao === 'PAT')); e.membros.forEach((m) => { if (m.mk === k) m.mk = null; }); }); S.servico.avulsos = S.servico.avulsos.filter((x) => x !== k); log(`${milName(k)} retirado do serviço`); save(); closeSheet(); break; }
+    case 'rmmil': (async () => { const k = el.dataset.k; if (!(await ask({ title: 'Retirar do serviço?', msg: `${esc(milName(k))} sairá de todas as GUs deste serviço.`, ok: 'Retirar', danger: true }))) return; S.servico.empregos.forEach((e) => { e.membros = e.membros.filter((m) => !(m.mk === k && m.funcao === 'PAT')); e.membros.forEach((m) => { if (m.mk === k) m.mk = null; }); }); S.servico.avulsos = S.servico.avulsos.filter((x) => x !== k); log(`${milName(k)} retirado do serviço`); save(); closeSheet(); })(); break;
     case 'vtr': openVtr(el.dataset.id); break;
     case 'vst': { const v = S.vtrs.find((x) => x.id === el.dataset.id); v.status = el.dataset.st; log(`Frota: VTR ${v.id} ${VTR_ST[v.status].e} ${VTR_ST[v.status].l}`); save(); openVtr(v.id); break; }
     case 'savevtr': { const v = S.vtrs.find((x) => x.id === el.dataset.id); v.obs = $('#vObs').value.trim(); v.modelo = $('#vMod').value.trim(); save(); toast('✅ Salvo'); closeSheet(); break; }
-    case 'delvtr': if (confirm('Remover VTR ' + el.dataset.id + ' da frota?')) { S.vtrs = S.vtrs.filter((x) => x.id !== el.dataset.id); save(); closeSheet(); } break;
-    case 'addvtr': { const id = (prompt('Prefixo da viatura (ex.: 2732):') || '').trim(); if (!id) return; if (!S.vtrs.some((v) => v.id === id)) S.vtrs.push({ id, status: 'pronto', obs: '', modelo: '' }); save(); render(); break; }
+    case 'delvtr': { const id = el.dataset.id; ask({ title: `Remover VTR ${id} da frota?`, ok: 'Remover', danger: true }).then((ok) => { if (ok) { S.vtrs = S.vtrs.filter((x) => x.id !== id); save(); closeSheet(); } }); break; }
+    case 'addvtr': ask({ title: 'Nova viatura', fields: [{ id: 'id', label: 'Prefixo', placeholder: 'Ex.: 2732', mode: 'numeric' }, { id: 'mod', label: 'Modelo (opcional)', placeholder: 'Ex.: Duster' }], ok: 'Adicionar' }).then((r) => { if (!r || !r.id) return; if (!S.vtrs.some((v) => v.id === r.id)) S.vtrs.push({ id: r.id, status: 'pronto', obs: '', modelo: r.mod }); save(); render(); toast('✅ VTR ' + r.id + ' adicionada'); }); break;
     case 'relvtr': S.ui.rel = 'vtr'; setTab('relatorios'); break;
     case 'rel': S.ui.rel = el.dataset.r; save(); render(); break;
     case 'wa': sendWhats($('#rOut').value); break;
@@ -896,18 +1072,24 @@ document.addEventListener('click', (ev) => {
     case 'share': if (navigator.share) navigator.share({ text: $('#rOut').value }).catch(() => {}); else copyTxt($('#rOut').value); break;
     case 'fag': S.ui.filtroAg = el.dataset.f; save(); render(); if (el.dataset.f === 'tudo') setTimeout(() => { const n = $('#nowline'); n && n.scrollIntoView({ block: 'center' }); }, 50); break;
     case 'gonow': { const n = $('#nowline'); n && n.scrollIntoView({ behavior: 'smooth', block: 'center' }); break; }
-    case 'addev': {
-      const hora = prompt('Horário do lembrete (HH:MM):', hhmm(nowMin() + 30)); if (!hora || !/^\d{1,2}:\d{2}$/.test(hora)) return;
-      const texto = prompt('Lembrete:'); if (!texto) return;
-      S.servico.eventos.push({ id: 'm' + uid(), hora: hora.padStart(5, '0'), d: toMin(hora) < 420 ? 1 : 0, texto, feito: false }); save(); render(); break;
-    }
+    case 'addev': ask({ title: '📝 Novo lembrete', fields: [{ id: 'hora', label: 'Horário', type: 'time', value: hhmm(nowMin() + 30) }, { id: 'texto', label: 'Lembrete', placeholder: 'Ex.: Ligar para o CIOP / conferir VTR 2716' }], ok: 'Adicionar' }).then((r) => {
+      if (!r || !r.hora || !r.texto) return;
+      S.servico.eventos.push({ id: 'm' + uid(), hora: r.hora, d: toMin(r.hora) < 420 ? 1 : 0, texto: r.texto, feito: false }); save(); render(); toast('✅ Lembrete criado');
+    }); break;
     case 'delev': S.servico.eventos = S.servico.eventos.filter((x) => x.id !== el.dataset.id); save(); render(); break;
     case 'deltarefa': S.servico.tarefas = S.servico.tarefas.filter((x) => x.id !== el.dataset.id); save(); render(); break;
     case 'config': openConfig(); break;
-    case 'savecfg': { const c2 = S.config; c2.nomeGuerra = $('#cNome').value.trim().toUpperCase(); c2.cmtCpc = $('#cCmtCpc').value.trim(); c2.subCpc = $('#cSubCpc').value.trim(); c2.cmtBpm = $('#cCmtBpm').value.trim(); c2.subBpm = $('#cSubBpm').value.trim(); c2.fiscal = $('#cFiscal').value.trim(); c2.localInicio = $('#cLocal').value.trim(); c2.assuntos = $('#cAss').value.split('\n').map((s) => s.trim()).filter(Boolean); save(); toast('✅ Configurações salvas'); closeSheet(); break; }
+    case 'savecfg': { const c2 = S.config; c2.nomeGuerra = $('#cNome').value.trim().toUpperCase(); c2.cmtCpc = $('#cCmtCpc').value.trim(); c2.subCpc = $('#cSubCpc').value.trim(); c2.cmtBpm = $('#cCmtBpm').value.trim(); c2.subBpm = $('#cSubBpm').value.trim(); c2.fiscal = $('#cFiscal').value.trim(); c2.localInicio = $('#cLocal').value.trim(); c2.assuntos = $('#cAss').value.split('\n').map((s) => s.trim()).filter(Boolean); c2.alertas = { ativo: $('#aAtivo').checked, antecedencia: Math.max(1, +$('#aAnt').value || 15), limOcorr: Math.max(5, +$('#aOc').value || 60), limQaj: Math.max(5, +$('#aQ').value || 40) }; save(); toast('✅ Configurações salvas'); closeSheet(); break; }
     case 'servico': openServico(); break;
     case 'savesvc': S.servico.data = $('#sData').value; S.servico.pelotao = $('#sPel').value.trim(); save(); toast('✅ Salvo'); closeSheet(); break;
-    case 'resetsvc': if (confirm('Iniciar um novo serviço em branco? (sugestão: exporte um backup antes)')) { S.servico = novoServico(); save(); closeSheet(); } break;
+    case 'resetsvc': case 'encerrar': ask({ title: a === 'encerrar' ? '🏁 Encerrar serviço?' : 'Novo serviço em branco?', msg: 'Um backup do serviço atual será baixado e guardado em "Serviços anteriores". Frota e banco de militares continuam.<br><br>Dica: antes, envie o relatório <b>Registro</b> se precisar.', ok: a === 'encerrar' ? 'Encerrar' : 'Iniciar novo', danger: true }).then((ok) => {
+      if (!ok) return; arquivarServico(a === 'encerrar' ? 'encerrado' : 'substituido'); S.servico = novoServico(); S.servico._id = uid(); save(); closeSheet(); toast('💾 Backup salvo – novo serviço iniciado');
+    }); break;
+    case 'hist': openHist(); break;
+    case 'histrest': { const x = getHist()[+el.dataset.i]; if (!x) break; ask({ title: `Abrir serviço de ${dataBR(x.data)}?`, msg: 'O serviço atual será arquivado antes (com backup).', ok: 'Abrir' }).then((ok) => { if (!ok) return; arquivarServico('antes-de-restaurar'); S.servico = x.servico; S.servico.notif = S.servico.notif || {}; save(); closeSheet(); toast('♻️ Serviço restaurado'); }); break; }
+    case 'notif': pedirNotificacao(); break;
+    case 'testnotif': notify('⏰ Teste de alerta – 27º BPM', 'Se você está vendo isto, os alertas estão funcionando.', 'teste'); break;
+    case 'qst': { const e = empById(c.id); const obs = $('#qObs').value.trim(); if (obs !== e.statusObs) { e.statusObs = obs; if (obs) log(`${empLabel(e)}: ${obs}`, e.id); } setStatus(c.id, el.dataset.st); toast(STATUS[el.dataset.st].e + ' ' + empLabel(e) + ': ' + STATUS[el.dataset.st].l); closeSheet(); break; }
     case 'backup': download(`gestao27bpm-${S.servico.data}-${Date.now().toString().slice(-5)}.json`, JSON.stringify(S)); break;
     case 'restore': $('#jsonInput').click(); break;
   }
@@ -917,4 +1099,5 @@ document.addEventListener('click', (ev) => {
 tick();
 $$('#tabs button').forEach((b) => b.classList.toggle('on', b.dataset.tab === S.ui.tab));
 render();
+setTimeout(checkAlerts, 1500);
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) navigator.serviceWorker.register('sw.js').catch(() => {});
