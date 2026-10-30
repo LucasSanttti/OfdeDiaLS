@@ -1,7 +1,7 @@
 /* Gestão de Serviço – 27º BPM Batalhão Cabanagem. Dados ficam somente neste aparelho (localStorage). */
 'use strict';
 const KEY = 'gvtr27.v1';
-const APP_VERSION = '1.3 (30/10/2026)';
+const APP_VERSION = '1.3.1 (30/10/2026)';
 const HIST_KEY = 'gvtr27.hist';
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
