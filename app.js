@@ -1,7 +1,7 @@
 /* Gestão de Serviço – 27º BPM Batalhão Cabanagem. Dados ficam somente neste aparelho (localStorage). */
 'use strict';
 const KEY = 'gvtr27.v1';
-const APP_VERSION = '1.2 (30/10/2026)';
+const APP_VERSION = '1.3 (30/10/2026)';
 const HIST_KEY = 'gvtr27.hist';
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
@@ -62,7 +62,7 @@ function defaults() {
   };
 }
 function novoServico(data) {
-  return { data: data || hojeISO(), pelotao: '', empregos: [], operacoes: [], tarefas: [], rondas: [], eventos: [], avisos: [], avulsos: [], log: [], notif: {} };
+  return { data: data || hojeISO(), pelotao: '', empregos: [], operacoes: [], tarefas: [], rondas: [], eventos: [], avisos: [], avulsos: [], log: [], notif: {}, fontes: [] };
 }
 function hojeISO() { const d = new Date(); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; }
 
@@ -72,6 +72,7 @@ if (!S || !S.v) S = defaults();
 S.ui = Object.assign({ tab: 'painel', filtro: 'agora', modo: 'cia', rel: 'mapa' }, S.ui || {});
 S.config.alertas = Object.assign({ ativo: true, antecedencia: 15, limOcorr: 60, limQaj: 40 }, S.config.alertas || {});
 S.servico.notif = S.servico.notif || {};
+S.servico.fontes = S.servico.fontes || [];
 function save() { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) { toast('⚠️ Não foi possível salvar'); } }
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
 
@@ -167,23 +168,41 @@ function dayOffset(tipo, ini, isTarefa) {
   if (['ordinario', 'fiscal', 'gpa', 'recobrimento'].includes(tipo)) return m < 300 ? 1 : 0;
   return 0;
 }
+const TIPO_ESC = { ordinario: '🚔 Ordinária', extra: '🟨 Extraordinária' };
+// Remove do serviço tudo o que veio de uma escala (fonte) importada.
+function removerFonte(fid) {
+  const sv = S.servico;
+  const saem = new Set();
+  sv.empregos.filter((e) => e.fonte === fid).forEach((e) => e.membros.forEach((m) => m.mk && saem.add(m.mk)));
+  sv.empregos = sv.empregos.filter((e) => e.fonte !== fid);
+  sv.operacoes = sv.operacoes.filter((o) => o.fonte !== fid);
+  sv.tarefas = sv.tarefas.filter((t) => t.fonte !== fid);
+  sv.rondas = sv.rondas.filter((r) => r.fonte !== fid);
+  sv.fontes = sv.fontes.filter((x) => x.id !== fid);
+  sv.avulsos = sv.avulsos.filter((k) => !saem.has(k) || empsOf(k).length);
+}
+// modo: 'novo' (novo serviço) | 'add' (juntar ao serviço atual; escala do mesmo tipo e data é substituída)
 function applyParsed(results, modo) {
   const datas = results.map((r) => r.data).filter(Boolean);
+  const dataAlvo = (results.find((r) => r.tipo === 'ordinario' && r.data) || {}).data || datas[0];
   if (modo === 'novo') {
     arquivarServico('antes-da-importacao');
-    const keep = S.servico;
-    S.servico = novoServico(datas[0] || keep.data); S.servico._id = uid();
+    S.servico = novoServico(dataAlvo || hojeISO()); S.servico._id = uid();
     log('Novo serviço criado por importação de escala');
-  } else if (!S.servico.data && datas[0]) S.servico.data = datas[0];
-  const sv = S.servico;
-  let nE = 0, nM = 0;
+  } else if (!S.servico.data && dataAlvo) S.servico.data = dataAlvo;
+  const sv = S.servico; sv.fontes = sv.fontes || [];
+  let nE = 0, nM = 0, subst = 0;
   for (const r of results) {
+    const antiga = sv.fontes.find((x) => x.tipo === r.tipo && x.data === r.data);
+    if (antiga) { removerFonte(antiga.id); subst++; log(`${TIPO_ESC[r.tipo]} de ${dataBR(r.data)} substituída pela nova versão (${r.arquivo})`); }
+    const fid = 'f' + uid();
+    sv.fontes.push({ id: fid, tipo: r.tipo, data: r.data, arquivo: r.arquivo, em: Date.now(), n: r.empregos.filter((e) => !e._skip).length });
     if (r.pelotao) sv.pelotao = r.pelotao;
     const opMap = {};
     for (const o of r.operacoes) {
       const id = 'op' + uid();
       opMap[o.id] = id;
-      sv.operacoes.push({ ...o, id, d: dayOffset('extra', o.inicio) });
+      sv.operacoes.push({ ...o, id, d: dayOffset('extra', o.inicio), fonte: fid });
     }
     for (const e of r.empregos) {
       if (e._skip) continue;
@@ -198,17 +217,17 @@ function applyParsed(results, modo) {
       sv.empregos.push({
         id: 'e' + uid(), tipo, operacao: e.operacao, opId: opMap[e.opId] || '', vtr: e.vtr, cia: e.cia, bairro: e.bairro,
         local: e.local, rotulo: '', inicio: e.inicio, fim: e.fim, d: dayOffset(tipo, e.inicio), turno: e.turno, qaj: e.qaj,
-        missao: e.missao, membros, status: tipo === 'extra' ? 'operacao' : 'area', statusDesde: null, statusObs: '',
+        missao: e.missao, membros, status: tipo === 'extra' ? 'operacao' : 'area', statusDesde: null, statusObs: '', fonte: fid,
       });
       nE++;
     }
-    for (const t of r.tarefas || []) sv.tarefas.push({ ...t, id: 't' + uid(), d: dayOffset('', t.inicio, true) });
-    for (const x of r.rondas || []) sv.rondas.push({ ...x, id: 'r' + uid() });
+    for (const t of r.tarefas || []) sv.tarefas.push({ ...t, id: 't' + uid(), d: dayOffset('', t.inicio, true), fonte: fid });
+    for (const x of r.rondas || []) sv.rondas.push({ ...x, id: 'r' + uid(), fonte: fid });
     sv.avisos.push(...(r.avisos || []));
-    log(`Escala ${r.tipo === 'extra' ? 'extraordinária' : 'ordinária'} importada: ${r.empregos.length} postos/GUs, ${(r.tarefas || []).length} tarefas`);
+    log(`${TIPO_ESC[r.tipo]} importada (${r.arquivo}): ${r.empregos.length} postos/GUs, ${(r.tarefas || []).length} tarefas`);
   }
   save();
-  return { nE, nM };
+  return { nE, nM, subst };
 }
 
 /* ---------- ações de emprego ---------- */
@@ -403,7 +422,7 @@ function arquivarServico(motivo) {
 function renderHeader() {
   $('#who').textContent = S.config.nomeGuerra + ' · Oficial de Dia';
   const sv = S.servico;
-  let h = `<div class="svc">📅 <b>${dataBR(sv.data)}</b> ${sv.data ? dowOf(sv.data).toLowerCase() : ''}${sv.pelotao ? ' · ' + esc(sv.pelotao) : ''} · ${sv.empregos.filter((e) => e.vtr).length} GUs · ${keysNoServico().length} militares</div>`;
+  let h = `<div class="svc">📅 <b>${dataBR(sv.data)}</b> ${sv.data ? dowOf(sv.data).toLowerCase() : ''}${sv.pelotao ? ' · ' + esc(sv.pelotao) : ''} · ${sv.empregos.filter((e) => e.vtr).length} GUs · ${keysNoServico().length} militares${(sv.fontes || []).length ? ' · 📄 ' + ['ordinario', 'extra'].map((t) => (sv.fontes.some((x) => x.tipo === t) ? '✓' : '✗') + (t === 'extra' ? 'Extra' : 'Ord')).join(' ') : ''}</div>`;
   if (S.ui.tab === 'painel') {
     h += `<div class="chips">` + [['agora', 'Agora'], ['1', '1º Turno'], ['2', '2º Turno'], ['tudo', 'Tudo']].map(([k, l]) => `<button class="chip ${S.ui.filtro === k ? 'on' : ''}" data-filtro="${k}">${l}</button>`).join('') +
       `<button class="chip" data-modo="1">${S.ui.modo === 'cia' ? '🗺️ Por Cia' : '🎯 Por missão'}</button></div>`;
@@ -434,8 +453,8 @@ function filtroEmp(e, now) {
 }
 function emptyState() {
   return `<div class="empty"><img src="brasao.png" alt=""><h3 style="color:var(--tx);font-size:17px;text-transform:none;letter-spacing:0">Nenhum serviço carregado</h3>
-  <p>Importe a escala ordinária e/ou extraordinária em PDF. O app separa as guarnições por Cia, operação e horário.</p>
-  <button class="btn pri" data-act="importar">📄 Importar escala (PDF)</button>
+  <p>Importe a escala <b>ordinária</b> e a <b>extraordinária</b> em PDF (pode escolher as duas juntas ou uma de cada vez). O app junta tudo no mesmo serviço e separa por Cia, operação e horário.</p>
+  <button class="btn pri" data-act="importar">📄 Importar escalas (PDF)</button>
   <p class="mt"><button class="btn sm ghost" data-act="novoemp">+ Criar GU manualmente</button></p></div>`;
 }
 function cardEmp(e, now) {
@@ -488,6 +507,9 @@ function renderPainel() {
   const nExc = ativos.filter((e) => statusExcedido(e)).length;
   if (nExc) h += `<div class="banner bad mt">⏱️ ${nExc} GU(s) acima do tempo limite em ocorrência/QAJ</div>`;
   if ('Notification' in window && Notification.permission === 'default' && S.config.alertas.ativo) h += `<button class="banner mt" data-act="notif">🔔 Toque para ativar os alertas de horário no celular</button>`;
+  const fts = sv.fontes || [];
+  if (fts.length && !fts.some((x) => x.tipo === 'extra')) h += `<button class="banner mt" data-act="importar">🟨 Só a escala ordinária está carregada. Toque para adicionar a extraordinária.</button>`;
+  else if (fts.length && !fts.some((x) => x.tipo === 'ordinario')) h += `<button class="banner mt" data-act="importar">🚔 Só a escala extraordinária está carregada. Toque para adicionar a ordinária.</button>`;
   const prox = agendaEvents().filter((ev) => ev.t >= now && !ev.done).slice(0, 3);
   if (prox.length) h += `<div class="next">${prox.map((ev) => `<div><b>${hhmm(ev.t)}</b><span>${esc(ev.title)}</span></div>`).join('')}</div>`;
   if (!list.length) return h + `<div class="empty">Nenhuma GU neste filtro. <br><button class="btn sm mt" data-filtro-set="tudo">Ver tudo</button></div>`;
@@ -511,7 +533,7 @@ function renderPainel() {
     for (const k in ops) { const o = opById(k); h += secHtml('🟨 ' + esc(o ? o.nome : k), 'geral', ops[k], now); }
   }
   h += secHtml('🏠 Permanência / Reserva / Adm', '', postos, now);
-  h += `<p class="hint mt2">💡 Segure o dedo sobre uma viatura para mudar o status rapidamente.</p><div class="row"><button class="btn sm" data-act="novoemp">+ Nova GU / posto</button></div>`;
+  h += `<p class="hint mt2">💡 Segure o dedo sobre uma viatura para mudar o status rapidamente.</p><div class="row wrap"><button class="btn sm" data-act="importar">📄 Adicionar escala</button><button class="btn sm" data-act="novoemp">+ Nova GU / posto</button></div>`;
   return h;
 }
 
@@ -911,7 +933,7 @@ async function copyTxt(txt) {
 function openMenu() {
   openSheet(`<div class="sh-title"><b style="font-size:18px">Menu</b><button class="iconbtn x" data-act="close">✕</button></div>
    <div class="list">
-    <div class="it" data-act="importar"><div class="grow"><div class="t1">📄 Importar escala (PDF)</div><div class="t2">Ordinária e/ou extraordinária – pode selecionar as duas</div></div>›</div>
+    <div class="it" data-act="importar"><div class="grow"><div class="t1">📄 Importar escalas (PDF)</div><div class="t2">Ordinária + extraordinária do mesmo serviço</div></div>›</div>
     <div class="it" data-act="novoemp"><div class="grow"><div class="t1">➕ Nova GU / posto</div></div>›</div>
     <div class="it" data-act="config"><div class="grow"><div class="t1">⚙️ Configurações</div><div class="t2">Nome de guerra, comandantes, assuntos do início de serviço</div></div>›</div>
     <div class="it" data-act="servico"><div class="grow"><div class="t1">📅 Dados do serviço</div><div class="t2">Data, pelotão, novo serviço</div></div>›</div>
@@ -939,36 +961,63 @@ async function loadPdfjs() {
   }
   return window.pdfjsLib;
 }
-async function handlePdfs(files) {
-  if (!files.length) return;
-  openSheet(`<div class="empty">⏳ Lendo ${files.length} arquivo(s)…</div>`, { kind: 'loading' }, { replace: sheetOpen });
+// Lê um ou mais PDFs e acumula na tela de conferência (dá para adicionar o 2º PDF depois).
+async function handlePdfs(files, append) {
+  files = [...files].filter((f) => /pdf$/i.test(f.type) || /\.pdf$/i.test(f.name));
+  if (!files.length) return toast('Selecione arquivo(s) PDF');
+  if (!append || !pending) pending = [];
+  openSheet(`<div class="empty">⏳ Lendo ${files.length} arquivo(s)…</div>`, { kind: 'import' }, { replace: sheetOpen });
+  const erros = [];
   try {
     const lib = await loadPdfjs();
-    const results = [];
     for (const f of files) {
-      const items = await EscalaParser.extractItems(lib, new Uint8Array(await f.arrayBuffer()));
-      const r = EscalaParser.parse(items); r.arquivo = f.name; results.push(r);
+      try {
+        const items = await EscalaParser.extractItems(lib, new Uint8Array(await f.arrayBuffer()));
+        const r = EscalaParser.parse(items); r.arquivo = f.name; r._k = uid();
+        if (!r.empregos.length && !(r.tarefas || []).length) { erros.push(`${f.name}: nenhuma guarnição encontrada (é uma escala do 27º BPM com texto?)`); continue; }
+        // mesmo tipo + mesma data já na lista: fica só o mais recente
+        pending = pending.filter((p) => !(p.tipo === r.tipo && p.data === r.data));
+        pending.push(r);
+      } catch (e) { console.error(e); erros.push(`${f.name}: ${e.message || 'erro de leitura'}`); }
     }
-    pending = results.sort((a, b) => (a.tipo === 'extra') - (b.tipo === 'extra'));
-    showImportPreview();
-  } catch (e) {
-    console.error(e);
-    openSheet(`<div class="sh-title"><b>Erro</b><button class="iconbtn x" data-act="close">✕</button></div><p>Não foi possível ler o PDF: ${esc(e.message)}</p><p class="hint">O PDF precisa ter texto (não pode ser foto/scan).</p>`, { kind: 'erro' }, { replace: true });
-  }
+  } catch (e) { erros.push(e.message); }
+  pending.sort((a, b) => (a.tipo === 'extra') - (b.tipo === 'extra'));
+  showImportPreview(erros);
 }
-function showImportPreview() {
-  const has = S.servico.empregos.length > 0;
-  let h = `<div class="sh-title"><b style="font-size:18px">Conferir importação</b><button class="iconbtn x" data-act="close">✕</button></div>`;
-  pending.forEach((r, ri) => {
-    h += `<div class="sec"><h2>${r.tipo === 'extra' ? '🟨 Extraordinária' : '🚔 Ordinária'} <span class="n">${r.empregos.length}</span></h2>
-      <div class="hint">${esc(r.arquivo)} · 📅 ${dataBR(r.data) || '?'}${r.pelotao ? ' · ' + esc(r.pelotao) : ''}${r.operacoes.length ? ' · ' + r.operacoes.length + ' operações' : ''}${r.tarefas && r.tarefas.length ? ' · ' + r.tarefas.length + ' tarefas do cartão-programa' : ''}${r.rondas.length ? ' · ' + r.rondas.length + ' rondas' : ''}</div>
-      ${r.avisos.map((a) => `<div class="warn">⚠️ ${esc(a)}</div>`).join('')}
-      ${r.empregos.map((e, i) => `<label class="chk"><input type="checkbox" data-imp="${ri}:${i}" checked><span><b>${e.vtr ? 'VTR ' + esc(e.vtr) : esc(TIPOS[e.tipo])}</b> · ${esc(e.operacao || TIPOS[e.tipo])} · ${hStr(e.inicio)}–${hStr(e.fim)}${e.cia ? ` · ${e.cia}ª Cia ${esc(e.bairro)}` : ''}${e.qaj ? ' · QAJ ' + e.qaj : ''}<br><small class="muted">${esc(e.local)}</small><br><small>${e.membros.filter((m) => !m.vazio).map((m) => `${m.funcao}: ${esc(m.grad + ' ' + m.nome)}${m.unidade ? ' (' + esc(m.unidade) + ')' : ''}`).join(' · ')}</small></span></label>`).join('')}</div>`;
-  });
-  h += has ? `<div class="row wrap"><button class="btn pri" style="flex:1" data-act="impapply" data-m="add">➕ Adicionar ao serviço atual</button><button class="btn" style="flex:1" data-act="impapply" data-m="novo">🆕 Substituir (novo serviço)</button></div>`
-    : `<button class="btn pri full" data-act="impapply" data-m="novo">✅ Confirmar e carregar serviço</button>`;
-  h += `<p class="hint">Dica: você pode corrigir qualquer GU depois, tocando nela no Painel.</p>`;
-  openSheet(h, { kind: 'import' }, { replace: true });
+function showImportPreview(erros = []) {
+  const sv = S.servico, has = sv.empregos.length > 0;
+  const ord = pending.find((r) => r.tipo === 'ordinario'), ext = pending.find((r) => r.tipo === 'extra');
+  const datas = [...new Set(pending.map((r) => r.data).filter(Boolean))];
+  const dataAlvo = (ord && ord.data) || datas[0] || '';
+  const mesmaData = has && dataAlvo && dataAlvo === sv.data;
+  const slot = (tipo, r) => {
+    const ja = has && mesmaData && (sv.fontes || []).find((x) => x.tipo === tipo && x.data === dataAlvo);
+    if (r) return `<div class="esc ok"><div class="grow"><b>${TIPO_ESC[tipo]}</b><div class="hint">📄 ${esc(r.arquivo)} · 📅 ${dataBR(r.data) || '?'} · ${r.empregos.length} GUs/postos${r.operacoes.length ? ' · ' + r.operacoes.length + ' operações' : ''}${(r.tarefas || []).length ? ' · ' + r.tarefas.length + ' tarefas' : ''}${ja ? '<br><span class="warn">vai substituir a versão já carregada neste serviço</span>' : ''}</div></div><button class="iconbtn" data-act="imprm" data-k="${r._k}" aria-label="Remover">✕</button></div>`;
+    if (ja) return `<div class="esc"><div class="grow"><b>${TIPO_ESC[tipo]}</b><div class="hint">✅ já carregada neste serviço (${esc(ja.arquivo)})</div></div></div>`;
+    return `<button class="esc add" data-act="impmais"><div class="grow"><b>${TIPO_ESC[tipo]}</b><div class="hint">não adicionada · toque para escolher o PDF</div></div><span style="font-size:22px">＋</span></button>`;
+  };
+  let h = `<div class="sh-title"><b style="font-size:18px">📄 Importar escalas</b><button class="iconbtn x" data-act="close">✕</button></div>
+    <p class="hint" style="margin-top:0">Junte a escala <b>ordinária</b> e a <b>extraordinária</b> do mesmo dia para ter o serviço completo.</p>
+    ${slot('ordinario', ord)}${slot('extra', ext)}
+    ${pending.filter((r) => r !== ord && r !== ext).map((r) => slot(r.tipo, r)).join('')}
+    <button class="btn full mt" data-act="impmais">➕ Adicionar outro PDF</button>
+    ${erros.map((e) => `<div class="warn mt">⚠️ ${esc(e)}</div>`).join('')}
+    ${datas.length > 1 ? `<div class="banner bad mt">⚠️ As escalas são de datas diferentes (${datas.map(dataBR).join(' e ')}). Confira se são do mesmo serviço.</div>` : ''}`;
+  if (pending.length) {
+    h += `<details class="box mt2"><summary>🔎 Conferir guarnições (${pending.reduce((n, r) => n + r.empregos.length, 0)})</summary>`;
+    pending.forEach((r) => {
+      h += `<h3>${TIPO_ESC[r.tipo]} ${r.pelotao ? '· ' + esc(r.pelotao) : ''}</h3>${r.avisos.map((a) => `<div class="warn">⚠️ ${esc(a)}</div>`).join('')}
+      ${r.empregos.map((e, i) => `<label class="chk"><input type="checkbox" data-imp="${r._k}:${i}" ${e._skip ? '' : 'checked'}><span><b>${e.vtr ? 'VTR ' + esc(e.vtr) : esc(TIPOS[e.tipo])}</b> · ${esc(e.operacao || TIPOS[e.tipo])} · ${hStr(e.inicio)}–${hStr(e.fim)}${e.cia ? ` · ${e.cia}ª Cia ${esc(e.bairro)}` : ''}${e.qaj ? ' · QAJ ' + e.qaj : ''}<br><small class="muted">${esc(e.local)}</small><br><small>${e.membros.filter((m) => !m.vazio).map((m) => `${m.funcao}: ${esc(m.grad + ' ' + m.nome)}${m.unidade ? ' (' + esc(m.unidade) + ')' : ''}`).join(' · ')}</small></span></label>`).join('')}`;
+    });
+    h += `</details>`;
+    const jaTem = (t) => has && mesmaData && (sv.fontes || []).some((x) => x.tipo === t);
+    const falta = !ord && !jaTem('ordinario') ? 'ordinária' : !ext && !jaTem('extra') ? 'extraordinária' : '';
+    if (falta) h += `<p class="hint">Sem a escala ${falta}? Pode carregar assim e adicionar depois pelo Menu → Importar escalas.</p>`;
+    if (!has) h += `<button class="btn pri full mt" data-act="impapply" data-m="novo">✅ Carregar serviço de ${dataBR(dataAlvo) || 'hoje'}</button>`;
+    else if (mesmaData) h += `<button class="btn pri full mt" data-act="impapply" data-m="add">➕ Juntar ao serviço de ${dataBR(sv.data)}</button><button class="btn ghost full mt" data-act="impapply" data-m="novo">🆕 Recomeçar o serviço só com estas escalas</button>`;
+    else h += `<button class="btn pri full mt" data-act="impapply" data-m="novo">🆕 Novo serviço de ${dataBR(dataAlvo) || '?'}</button><p class="hint">O serviço atual (${dataBR(sv.data)}) será arquivado com backup.</p><button class="btn ghost full" data-act="impapply" data-m="add">Juntar ao serviço atual mesmo assim</button>`;
+  }
+  openSheet(h, { kind: 'import' }, { replace: true, reopen: () => showImportPreview() });
 }
 function openHist() {
   const h = getHist();
@@ -995,6 +1044,9 @@ function openServico() {
    <label class="f"><span>Data do serviço (dia em que começa o 1º turno)</span><input type="date" id="sData" value="${sv.data}"></label>
    <label class="f"><span>Pelotão</span><input type="text" id="sPel" value="${esc(sv.pelotao)}"></label>
    <button class="btn blue full" data-act="savesvc">Salvar</button>
+   <h3 class="mt2">📄 Escalas carregadas</h3>
+   <div class="list">${(sv.fontes || []).map((x) => `<div class="it"><div class="grow"><div class="t1">${TIPO_ESC[x.tipo] || x.tipo} · ${dataBR(x.data)}</div><div class="t2">${esc(x.arquivo)} · ${x.n} GUs/postos · ${new Date(x.em).toLocaleString('pt-BR')}</div></div><button class="btn sm ghost" data-act="rmfonte" data-id="${x.id}">🗑️</button></div>`).join('') || '<div class="hint">Nenhuma escala importada (ou serviço criado antes da v1.3).</div>'}</div>
+   <button class="btn full mt" data-act="importar">➕ Adicionar escala a este serviço</button>
    <div class="sec mt2"><h2>Zona de risco</h2><p class="hint">Novo serviço apaga GUs, linha do tempo e registro deste serviço. Frota e banco de militares são mantidos.</p>
    <button class="btn pri full" data-act="resetsvc">🆕 Iniciar novo serviço em branco</button></div>`, { kind: 'svc' }, { reopen: openServico });
 }
@@ -1004,10 +1056,30 @@ function download(name, text) {
 
 /* ================= EVENTOS ================= */
 $('#menuBtn').addEventListener('click', openMenu);
-$('#pdfInput').addEventListener('change', (ev) => { const f = [...ev.target.files]; ev.target.value = ''; handlePdfs(f); });
+let pdfAppend = false;
+$('#pdfInput').addEventListener('change', (ev) => { const f = [...ev.target.files]; ev.target.value = ''; handlePdfs(f, pdfAppend); pdfAppend = false; });
+// Computador: arrastar e soltar PDFs na janela
+document.addEventListener('dragover', (ev) => { if ([...(ev.dataTransfer.items || [])].some((i) => i.kind === 'file')) ev.preventDefault(); });
+document.addEventListener('drop', (ev) => { const fs = [...(ev.dataTransfer.files || [])]; if (!fs.length) return; ev.preventDefault(); handlePdfs(fs, !!(sheetCtx && sheetCtx.kind === 'import')); });
+// Android: escalas compartilhadas pelo WhatsApp/Arquivos ("Compartilhar" → 27º BPM)
+async function receberCompartilhados() {
+  if (!/[?&]share=1/.test(location.search) || !('caches' in window)) return;
+  history.replaceState(null, '', location.pathname);
+  try {
+    const c = await caches.open('gvtr27-share');
+    const files = [];
+    for (const req of await c.keys()) {
+      const res = await c.match(req); const name = new URL(req.url).searchParams.get('name') || 'escala.pdf';
+      files.push(new File([await res.blob()], name, { type: 'application/pdf' }));
+      await c.delete(req);
+    }
+    if (files.length) handlePdfs(files, false);
+    else toast('Nenhum PDF recebido');
+  } catch (e) { toast('Erro ao receber arquivos: ' + e.message); }
+}
 $('#jsonInput').addEventListener('change', async (ev) => {
   const f = ev.target.files[0]; ev.target.value = ''; if (!f) return;
-  try { const d = JSON.parse(await f.text()); if (!d.v || !d.servico) throw new Error('arquivo inválido'); S = d; S.servico.notif = S.servico.notif || {}; S.config.alertas = Object.assign({ ativo: true, antecedencia: 15, limOcorr: 60, limQaj: 40 }, S.config.alertas || {}); save(); toast('♻️ Backup restaurado'); closeSheet(); } catch (e) { toast('Erro: ' + e.message); }
+  try { const d = JSON.parse(await f.text()); if (!d.v || !d.servico) throw new Error('arquivo inválido'); S = d; S.servico.notif = S.servico.notif || {}; S.servico.fontes = S.servico.fontes || []; S.config.alertas = Object.assign({ ativo: true, antecedencia: 15, limOcorr: 60, limQaj: 40 }, S.config.alertas || {}); save(); toast('♻️ Backup restaurado'); closeSheet(); } catch (e) { toast('Erro: ' + e.message); }
 });
 document.addEventListener('change', (ev) => {
   const t = ev.target;
@@ -1044,10 +1116,13 @@ document.addEventListener('click', (ev) => {
     case 'delemp': (async () => { const e = empById(c.id); if (!(await ask({ title: `Excluir ${empLabel(e)}?`, msg: `${esc(e.operacao || TIPOS[e.tipo])} · ${e.inicio}–${e.fim}. Os militares voltam para "sem alocação".`, ok: 'Excluir', danger: true }))) return; e.membros.forEach((m) => m.mk && !S.servico.empregos.some((o) => o !== e && o.membros.some((x) => x.mk === m.mk)) && S.servico.avulsos.push(m.mk)); S.servico.empregos = S.servico.empregos.filter((x) => x !== e); log(`${empLabel(e)} excluída`); save(); closeSheet(); })(); break;
     case 'novoemp': novoEmp(); break;
     case 'createemp': { const e = c.emp; readEmpForm(e); S.servico.empregos.push(e); if (!S.servico.data) S.servico.data = hojeISO(); log(`${empLabel(e)} criada (${e.inicio}–${e.fim})`, e.id); save(); openEmp(e.id, { replace: true }); break; }
-    case 'importar': $('#pdfInput').click(); break;
+    case 'importar': pdfAppend = false; $('#pdfInput').click(); break;
+    case 'impmais': pdfAppend = true; $('#pdfInput').click(); break;
+    case 'imprm': pending = pending.filter((r) => r._k !== el.dataset.k); showImportPreview(); break;
+    case 'rmfonte': { const x = S.servico.fontes.find((y) => y.id === el.dataset.id); ask({ title: 'Remover escala do serviço?', msg: `${TIPO_ESC[x.tipo]} (${esc(x.arquivo)}): as GUs, operações e tarefas que vieram dela saem do serviço.`, ok: 'Remover', danger: true }).then((ok) => { if (!ok) return; removerFonte(x.id); log(`${TIPO_ESC[x.tipo]} removida do serviço`); save(); toast('Escala removida'); openServico(); }); break; }
     case 'impapply': {
-      $$('[data-imp]').forEach((i) => { const [ri, ei] = i.dataset.imp.split(':').map(Number); pending[ri].empregos[ei]._skip = !i.checked; });
-      const r = applyParsed(pending, el.dataset.m); pending = null; toast(`✅ ${r.nE} GUs/postos carregados`); S.ui.filtro = 'tudo'; closeSheet(); setTab('painel'); break;
+      $$('[data-imp]').forEach((i) => { const [k, ei] = i.dataset.imp.split(':'); const r = pending.find((p) => p._k === k); if (r) r.empregos[+ei]._skip = !i.checked; });
+      const r = applyParsed(pending, el.dataset.m); pending = null; toast(`✅ ${r.nE} GUs/postos carregados${r.subst ? ' (' + r.subst + ' escala(s) atualizada(s))' : ''}`); S.ui.filtro = 'tudo'; closeSheet(); setTab('painel'); break;
     }
     case 'mil': openMil(el.dataset.k); break;
     case 'addmil': openPicker({}); break;
@@ -1086,7 +1161,7 @@ document.addEventListener('click', (ev) => {
       if (!ok) return; arquivarServico(a === 'encerrar' ? 'encerrado' : 'substituido'); S.servico = novoServico(); S.servico._id = uid(); save(); closeSheet(); toast('💾 Backup salvo – novo serviço iniciado');
     }); break;
     case 'hist': openHist(); break;
-    case 'histrest': { const x = getHist()[+el.dataset.i]; if (!x) break; ask({ title: `Abrir serviço de ${dataBR(x.data)}?`, msg: 'O serviço atual será arquivado antes (com backup).', ok: 'Abrir' }).then((ok) => { if (!ok) return; arquivarServico('antes-de-restaurar'); S.servico = x.servico; S.servico.notif = S.servico.notif || {}; save(); closeSheet(); toast('♻️ Serviço restaurado'); }); break; }
+    case 'histrest': { const x = getHist()[+el.dataset.i]; if (!x) break; ask({ title: `Abrir serviço de ${dataBR(x.data)}?`, msg: 'O serviço atual será arquivado antes (com backup).', ok: 'Abrir' }).then((ok) => { if (!ok) return; arquivarServico('antes-de-restaurar'); S.servico = x.servico; S.servico.notif = S.servico.notif || {}; S.servico.fontes = S.servico.fontes || []; save(); closeSheet(); toast('♻️ Serviço restaurado'); }); break; }
     case 'notif': pedirNotificacao(); break;
     case 'testnotif': notify('⏰ Teste de alerta – 27º BPM', 'Se você está vendo isto, os alertas estão funcionando.', 'teste'); break;
     case 'qst': { const e = empById(c.id); const obs = $('#qObs').value.trim(); if (obs !== e.statusObs) { e.statusObs = obs; if (obs) log(`${empLabel(e)}: ${obs}`, e.id); } setStatus(c.id, el.dataset.st); toast(STATUS[el.dataset.st].e + ' ' + empLabel(e) + ': ' + STATUS[el.dataset.st].l); closeSheet(); break; }
@@ -1100,4 +1175,5 @@ tick();
 $$('#tabs button').forEach((b) => b.classList.toggle('on', b.dataset.tab === S.ui.tab));
 render();
 setTimeout(checkAlerts, 1500);
+receberCompartilhados();
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) navigator.serviceWorker.register('sw.js').catch(() => {});
