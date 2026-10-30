@@ -1,0 +1,17 @@
+{
+  "name": "Gestão de Serviço – 27º BPM Batalhão Cabanagem",
+  "short_name": "27º BPM",
+  "description": "Gestão de viaturas, efetivo e operações do Oficial de Dia – 27º BPM",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0b0f14",
+  "theme_color": "#0b0f14",
+  "lang": "pt-BR",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icons/icon-512-maskable.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
