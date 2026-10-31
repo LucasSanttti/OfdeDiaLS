@@ -1,7 +1,7 @@
-const CACHE = 'gvtr27-v6';
+const CACHE = 'gvtr27-v7';
 const SHARE = 'gvtr27-share';
-const CDN = ['https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js', 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'];
-const ASSETS = ['./', 'index.html', 'app.js?v=1.3.1', 'parser.js?v=1.3.1', 'manifest.json', 'brasao.png', 'icon-192.png', 'icon-512.png', 'icon-512-maskable.png'];
+const CDN = ['https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/legacy/build/pdf.min.js', 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/legacy/build/pdf.worker.min.js'];
+const ASSETS = ['./', 'index.html', 'app.js?v=1.4', 'parser.js?v=1.4', 'apple-touch-icon.png', 'manifest.json', 'brasao.png', 'icon-192.png', 'icon-512.png', 'icon-512-maskable.png'];
 self.addEventListener('install', (e) => { e.waitUntil(caches.open(CACHE).then((c) => Promise.all([...ASSETS, ...CDN].map((a) => c.add(new Request(a, { cache: 'reload' })).catch(() => console.warn('SW: não encontrado', a))))).then(() => self.skipWaiting())); });
 self.addEventListener('activate', (e) => { e.waitUntil(caches.keys().then((ks) => Promise.all(ks.filter((k) => k !== CACHE && k !== SHARE).map((k) => caches.delete(k)))).then(() => self.clients.claim())); });
 // rede primeiro (pega atualizações), cache se offline

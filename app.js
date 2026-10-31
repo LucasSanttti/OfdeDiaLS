@@ -1,7 +1,9 @@
 /* Gestão de Serviço – 27º BPM Batalhão Cabanagem. Dados ficam somente neste aparelho (localStorage). */
 'use strict';
 const KEY = 'gvtr27.v1';
-const APP_VERSION = '1.3.1 (30/10/2026)';
+const APP_VERSION = '1.4 (30/10/2026)';
+const IS_IOS = /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const IS_STANDALONE = window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
 const HIST_KEY = 'gvtr27.hist';
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
@@ -401,7 +403,7 @@ function checkAlerts() {
   if (changed) save();
 }
 async function pedirNotificacao() {
-  if (!('Notification' in window)) return toast('Este navegador não suporta notificações');
+  if (!('Notification' in window)) return toast(IS_IOS && !IS_STANDALONE ? 'No iPhone, instale o app (Compartilhar → Adicionar à Tela de Início) para receber alertas' : 'Este aparelho não suporta notificações; os alertas aparecem dentro do app');
   const p = await Notification.requestPermission();
   toast(p === 'granted' ? '🔔 Notificações ativadas' : '🔕 Notificações bloqueadas no navegador');
   render();
@@ -451,8 +453,12 @@ function filtroEmp(e, now) {
   if (f === 'agora') { const sp = span(e); return !sp || (now >= sp[0] - 30 && now < sp[1]); }
   return noTurno(e, f);
 }
+function iosTip() {
+  if (!IS_IOS || IS_STANDALONE) return '';
+  return `<div class="ios-tip"><span style="font-size:22px">📲</span><div><b>Instalar no iPhone:</b> no Safari, toque em <b>Compartilhar</b> (quadrado com seta ⬆️) → <b>Adicionar à Tela de Início</b>. Abra sempre pelo ícone: assim os dados ficam guardados e os alertas funcionam.</div></div>`;
+}
 function emptyState() {
-  return `<div class="empty"><img src="brasao.png" alt=""><h3 style="color:var(--tx);font-size:17px;text-transform:none;letter-spacing:0">Nenhum serviço carregado</h3>
+  return iosTip() + `<div class="empty"><img src="brasao.png" alt=""><h3 style="color:var(--tx);font-size:17px;text-transform:none;letter-spacing:0">Nenhum serviço carregado</h3>
   <p>Importe a escala <b>ordinária</b> e a <b>extraordinária</b> em PDF (pode escolher as duas juntas ou uma de cada vez). O app junta tudo no mesmo serviço e separa por Cia, operação e horário.</p>
   <button class="btn pri" data-act="importar">📄 Importar escalas (PDF)</button>
   <p class="mt"><button class="btn sm ghost" data-act="novoemp">+ Criar GU manualmente</button></p></div>`;
@@ -499,7 +505,7 @@ function renderPainel() {
   // contadores (GUs com VTR ativas agora)
   const ativos = sv.empregos.filter((e) => e.vtr && isActive(e, now));
   const cnt = (st) => ativos.filter((e) => st.includes(e.status)).length;
-  let h = `<div class="counters">
+  let h = iosTip() + `<div class="counters">
     <div class="counter"><b>${ativos.length}</b><span>GUs agora</span></div>
     <div class="counter"><b style="color:var(--ok)">${cnt(['area', 'operacao', 'apoio'])}</b><span>Na área/op.</span></div>
     <div class="counter"><b style="color:var(--bad)">${cnt(['ocorrencia', 'conduzindo'])}</b><span>Ocorrência</span></div>
@@ -944,7 +950,7 @@ function openMenu() {
    </div><p class="hint mt2">🔒 Os dados ficam só neste aparelho. Nada é enviado para servidores.</p><p class="hint">Versão ${APP_VERSION}</p>`, { kind: 'menu' }, { reopen: openMenu });
 }
 let pending = null;
-const CDN_PDF = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/';
+const CDN_PDF = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/legacy/build/';
 function loadScript(src) { return new Promise((res, rej) => { const s = document.createElement('script'); s.src = src; s.onload = res; s.onerror = () => { s.remove(); rej(new Error(src)); }; document.head.appendChild(s); }); }
 // Leitor de PDF: usa a cópia local se existir; senão baixa do CDN (fica guardado para uso offline).
 async function loadPdfjs() {
@@ -1051,7 +1057,15 @@ function openServico() {
    <button class="btn pri full" data-act="resetsvc">🆕 Iniciar novo serviço em branco</button></div>`, { kind: 'svc' }, { reopen: openServico });
 }
 function download(name, text) {
-  const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], { type: 'application/json' })); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  const blob = new Blob([text], { type: 'application/json' });
+  // iPhone/iPad: o "baixar" de app instalado não funciona bem; usa a folha de Compartilhar (Salvar em Arquivos)
+  if (IS_IOS && navigator.canShare) {
+    try {
+      const file = new File([blob], name, { type: 'application/json' });
+      if (navigator.canShare({ files: [file] })) { navigator.share({ files: [file], title: name }).catch(() => {}); return; }
+    } catch (e) { /* segue para o download comum */ }
+  }
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 4000);
 }
 
 /* ================= EVENTOS ================= */
