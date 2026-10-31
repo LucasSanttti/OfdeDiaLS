@@ -1,7 +1,7 @@
 /* Gestão de Serviço – 27º BPM Batalhão Cabanagem. Dados ficam somente neste aparelho (localStorage). */
 'use strict';
 const KEY = 'gvtr27.v1';
-const APP_VERSION = '1.4 (30/10/2026)';
+const APP_VERSION = '1.4.1 (30/10/2026)';
 const IS_IOS = /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 const IS_STANDALONE = window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
 const HIST_KEY = 'gvtr27.hist';
@@ -950,7 +950,7 @@ function openMenu() {
    </div><p class="hint mt2">🔒 Os dados ficam só neste aparelho. Nada é enviado para servidores.</p><p class="hint">Versão ${APP_VERSION}</p>`, { kind: 'menu' }, { reopen: openMenu });
 }
 let pending = null;
-const CDN_PDF = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/legacy/build/';
+const CDN_PDF = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/legacy/build/';
 function loadScript(src) { return new Promise((res, rej) => { const s = document.createElement('script'); s.src = src; s.onload = res; s.onerror = () => { s.remove(); rej(new Error(src)); }; document.head.appendChild(s); }); }
 // Leitor de PDF: usa a cópia local se existir; senão baixa do CDN (fica guardado para uso offline).
 async function loadPdfjs() {
